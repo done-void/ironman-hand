@@ -27,6 +27,25 @@
     text-shadow: 0 0 10px rgba(0,200,255,.9);
     transition: opacity 1s; white-space: nowrap;
   }
+  #modelbar {
+    position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+    display: flex; gap: 8px; z-index: 20;
+  }
+  #modelbar button {
+    width: 46px; height: 46px; border-radius: 10px;
+    background: rgba(0, 20, 40, .45); color: #7fdfff;
+    border: 1px solid rgba(0,200,255,.4); font-size: 20px; line-height: 1;
+    backdrop-filter: blur(4px); cursor: pointer; touch-action: manipulation;
+    text-shadow: 0 0 8px rgba(0,200,255,.8); transition: background .15s, box-shadow .15s;
+  }
+  #modelbar button.active {
+    background: rgba(0,120,200,.45);
+    box-shadow: inset 0 0 14px rgba(0,200,255,.5), 0 0 10px rgba(0,200,255,.5);
+  }
+  @media (max-width: 640px) {
+    #info { font-size: 10px; line-height: 1.7; left: 12px; right: 12px; bottom: 72px; padding: 8px 10px; }
+    #modelbar button { width: 42px; height: 42px; font-size: 18px; }
+  }
 </style>
 </head>
 <body>
@@ -36,11 +55,19 @@
 <canvas id="gl"></canvas>
 <div id="status">SYSTEM BOOTING…</div>
 <div id="info">
-  ✋ 手のひらをかざす → オブジェクト出現<br>
+  ✋ 手のひらをかざす → オブジェクト出現 / 手を前後に動かす → 近づく・遠ざかる<br>
   🤏 つまむ → 掴んで移動 / 素早く振って離す → 投げる（壁で跳ね返る）<br>
-  🖐 投げた物に手を近づける → キャッチ<br>
-  👐 両手で同時につまむ → 拡大・縮小<br>
-  <b>1</b>:キューブ <b>2</b>:球体 <b>3</b>:リアクター <b>4</b>:太陽系 <b>5</b>:銀河（<b>M</b>:切替）/ <b>H</b>:スケルトン
+  🖐 投げた物に手を近づける → キャッチ / 👐 両手で同時につまむ → 拡大・縮小<br>
+  <b>1</b>:キューブ <b>2</b>:球体 <b>3</b>:リアクター <b>4</b>:太陽系 <b>5</b>:銀河（<b>M</b>:切替）/ <b>H</b>:スケルトン / 🔊 クリックでサウンドON
+</div>
+<div id="modelbar">
+  <button data-shape="0" title="キューブ">◻</button>
+  <button data-shape="1" title="球体">◯</button>
+  <button data-shape="2" title="アークリアクター">⊙</button>
+  <button data-shape="3" title="太陽系">☀</button>
+  <button data-shape="4" title="銀河">🌌</button>
+  <button id="btn-skel" title="スケルトン表示切替">🖐</button>
+  <button id="btn-sound" title="サウンドON/OFF">🔊</button>
 </div>
 
 <script type="importmap">
@@ -73,6 +100,109 @@ function toast(msg, ms = 2500) {
   toastTimer = setTimeout(() => (statusEl.style.opacity = "0"), ms);
 }
 
+// ---------- サウンド(Web Audioで全部合成・外部ファイルなし) ----------
+class SFX {
+  constructor() { this.ctx = null; this.enabled = true; }
+  init() {
+    if (this.ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = this.enabled ? 0.5 : 0;
+    this.master.connect(this.ctx.destination);
+    const len = this.ctx.sampleRate * 2;
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    this.noiseBuf = buf;
+    this.startAmbient();
+  }
+  // 環境音: 低いドローン + 高域の淡いきらめき(どちらもゆっくり揺らぐ)
+  startAmbient() {
+    const ctx = this.ctx, t = ctx.currentTime;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.055, t + 5);
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass"; lp.frequency.value = 240;
+    lp.connect(g); g.connect(this.master);
+    for (const [freq, type, det] of [[55, "sine", 0], [55, "sine", 7], [110, "triangle", -4]]) {
+      const o = ctx.createOscillator();
+      o.type = type; o.frequency.value = freq; o.detune.value = det;
+      o.connect(lp); o.start();
+    }
+    const lfo = ctx.createOscillator(), lfoG = ctx.createGain();
+    lfo.frequency.value = 0.07; lfoG.gain.value = 0.02;
+    lfo.connect(lfoG); lfoG.connect(g.gain); lfo.start();
+    const shimmer = ctx.createBufferSource();
+    shimmer.buffer = this.noiseBuf; shimmer.loop = true;
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass"; bp.frequency.value = 2600; bp.Q.value = 20;
+    const sg = ctx.createGain(); sg.gain.value = 0.006;
+    shimmer.connect(bp); bp.connect(sg); sg.connect(this.master);
+    const lfo2 = ctx.createOscillator(), lfo2G = ctx.createGain();
+    lfo2.frequency.value = 0.045; lfo2G.gain.value = 0.005;
+    lfo2.connect(lfo2G); lfo2G.connect(sg.gain); lfo2.start();
+    shimmer.start();
+  }
+  blip(f0, f1, dur, vol, type = "sine", delay = 0) {
+    if (!this.ctx || !this.enabled) return;
+    const ctx = this.ctx, t = ctx.currentTime + delay;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(f1, 1), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t + dur + 0.02);
+  }
+  whoosh(f0, f1, dur, vol) {
+    if (!this.ctx || !this.enabled) return;
+    const ctx = this.ctx, t = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuf;
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass"; bp.Q.value = 1.4;
+    bp.frequency.setValueAtTime(f0, t);
+    bp.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(bp); bp.connect(g); g.connect(this.master);
+    src.start(t); src.stop(t + dur + 0.05);
+  }
+  appear() { this.whoosh(300, 2400, 0.45, 0.1); this.blip(180, 740, 0.4, 0.07); }
+  grab() { this.blip(480, 940, 0.1, 0.16, "triangle"); }
+  release(speed) { this.whoosh(1800, 260, 0.32, THREE.MathUtils.clamp(0.05 + speed * 0.04, 0.08, 0.2)); }
+  bounce(impact) {
+    if (!this.ctx) return;
+    if (this.ctx.currentTime - (this._lastBounce ?? 0) < 0.08) return;
+    this._lastBounce = this.ctx.currentTime;
+    this.blip(240, 85, 0.13, THREE.MathUtils.clamp(impact * 0.06, 0.04, 0.18));
+  }
+  catchChime() { this.blip(660, 660, 0.3, 0.1); this.blip(990, 990, 0.35, 0.08, "sine", 0.07); }
+  uiSwitch() { this.blip(840, 1280, 0.07, 0.09, "triangle"); }
+  toggle() {
+    if (!this.ctx) { this.init(); return this.enabled; }  // 初回タップはONで開始
+    this.enabled = !this.enabled;
+    this.master.gain.value = this.enabled ? 0.5 : 0;
+    return this.enabled;
+  }
+}
+const sfx = new SFX();
+// AudioContextはユーザー操作がないと開始できないので最初の操作で起動
+// (サウンドボタン自身はtoggle()側で起動するため除外)
+const bootAudio = e => {
+  if (e.target && e.target.id === "btn-sound") return;
+  sfx.init();
+  removeEventListener("pointerdown", bootAudio);
+  removeEventListener("keydown", bootAudio);
+};
+addEventListener("pointerdown", bootAudio);
+addEventListener("keydown", bootAudio);
+
 // ---------- Three.js セットアップ ----------
 const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("gl"), alpha: true, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -97,12 +227,12 @@ function worldPerPixel() {
   const h = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.position.z;
   return h / innerHeight;
 }
-// スクリーン座標(px) → z=0平面のワールド座標
-function screenToWorld(sx, sy) {
+// スクリーン座標(px) → 指定z平面のワールド座標
+function screenToWorld(sx, sy, targetZ = 0) {
   const ndc = new THREE.Vector3((sx / innerWidth) * 2 - 1, -(sy / innerHeight) * 2 + 1, 0.5);
   ndc.unproject(camera);
   const dir = ndc.sub(camera.position).normalize();
-  const t = -camera.position.z / dir.z;
+  const t = (targetZ - camera.position.z) / dir.z;
   return camera.position.clone().add(dir.multiplyScalar(t));
 }
 
@@ -252,37 +382,115 @@ function buildShapes(mats) {
     }});
   }
 
-  // 5) 渦巻銀河
+  // 5) 渦巻銀河(シェーダーパーティクル: 差動回転 + 星ごとの瞬き + 掴むとバースト)
   {
     const grp = new THREE.Group();
-    const N = 700;
-    const pos = new Float32Array(N * 3), col = new Float32Array(N * 3);
+    const N = 4500;
+    // positionに (半径, 初期角, 面からの高さ) を詰めて、xyはシェーダーで毎フレーム計算する
+    const pos = new Float32Array(N * 3);
+    const colA = new Float32Array(N * 3);
+    const sizeA = new Float32Array(N), phaseA = new Float32Array(N), randA = new Float32Array(N);
     const cCore = new THREE.Color(0xfff2cc);
-    const cArm = [new THREE.Color(0x66aaff), new THREE.Color(0xcc88ff)];
+    const cArms = [new THREE.Color(0x66aaff), new THREE.Color(0xcc88ff), new THREE.Color(0x88ddff)];
     for (let i = 0; i < N; i++) {
-      const arm = i % 2;
-      const f = Math.pow(Math.random(), 0.5);   // 中心ほど高密度
-      const r = f * 0.55;
-      const a = f * 4.5 + arm * Math.PI + (Math.random() - 0.5) * 0.5;
-      pos[i * 3]     = Math.cos(a) * r + (Math.random() - 0.5) * 0.04;
-      pos[i * 3 + 1] = Math.sin(a) * r + (Math.random() - 0.5) * 0.04;
-      pos[i * 3 + 2] = (Math.random() - 0.5) * 0.06 * (1.3 - f);
-      const c = cCore.clone().lerp(cArm[arm], f);
-      col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+      const bulge = i < N * 0.22;   // 中心バルジ
+      let r, a, zs;
+      if (bulge) {
+        r = Math.pow(Math.random(), 2) * 0.16;
+        a = Math.random() * Math.PI * 2;
+        zs = 0.055 * (1 - r / 0.16) + 0.015;
+      } else {
+        const f = Math.pow(Math.random(), 0.6);
+        r = 0.08 + f * 0.5;
+        a = f * 4.6 + (i % 3) * (Math.PI * 2 / 3) + (Math.random() - 0.5) * 0.45;
+        zs = 0.04 * (1.25 - f);
+      }
+      pos[i * 3] = r;
+      pos[i * 3 + 1] = a;
+      pos[i * 3 + 2] = (Math.random() - 0.5) * 2 * zs;
+      const c = cCore.clone().lerp(cArms[i % 3], THREE.MathUtils.clamp((r - 0.05) / 0.5, 0, 1));
+      if (!bulge && Math.random() < 0.04) c.set(0xeaf6ff).multiplyScalar(1.25);  // たまに青白い巨星
+      colA[i * 3] = c.r; colA[i * 3 + 1] = c.g; colA[i * 3 + 2] = c.b;
+      sizeA[i] = bulge ? 1.5 + Math.random() * 2 : 0.8 + Math.pow(Math.random(), 3) * 4.2;
+      phaseA[i] = Math.random() * Math.PI * 2;
+      randA[i] = Math.random();
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
-    const pts = new THREE.Points(geo, reg(new THREE.PointsMaterial({
-      size: 0.018, vertexColors: true, transparent: true, opacity: 0.9,
-      blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
-    }), 0.9));
-    const core = mesh(new THREE.SphereGeometry(0.07, 12, 8), 0.9, 0xfff2cc);
-    grp.add(pts, core);
+    geo.setAttribute("aColor", new THREE.BufferAttribute(colA, 3));
+    geo.setAttribute("aSize", new THREE.BufferAttribute(sizeA, 1));
+    geo.setAttribute("aPhase", new THREE.BufferAttribute(phaseA, 1));
+    geo.setAttribute("aRand", new THREE.BufferAttribute(randA, 1));
+    const galMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uBurst: { value: 0 },
+        uOpacity: { value: 0.95 },
+        uScale: { value: 540 },
+      },
+      vertexShader: `
+        attribute vec3 aColor;
+        attribute float aSize;
+        attribute float aPhase;
+        attribute float aRand;
+        uniform float uTime;
+        uniform float uBurst;
+        uniform float uScale;
+        varying vec3 vColor;
+        varying float vTw;
+        void main() {
+          float r = position.x;
+          float ang = position.y + uTime * (0.5 / (r + 0.15));      // 差動回転: 中心ほど速い
+          float rr = r * (1.0 + uBurst * (0.45 + aRand * 0.9));     // バーストで放射状に膨張
+          vec3 p = vec3(cos(ang) * rr, sin(ang) * rr, position.z * (1.0 + uBurst * 2.5));
+          vec4 mv = modelViewMatrix * vec4(p, 1.0);
+          vTw = 0.7 + 0.3 * sin(uTime * (2.5 + aRand * 4.0) + aPhase);
+          vColor = aColor;
+          float sc = length(modelViewMatrix[0].xyz);                // オブジェクトのスケールに追従
+          gl_PointSize = max(aSize * vTw * sc * uScale * 0.03 / -mv.z, 1.5);
+          gl_Position = projectionMatrix * mv;
+        }
+      `,
+      fragmentShader: `
+        uniform float uOpacity;
+        varying vec3 vColor;
+        varying float vTw;
+        void main() {
+          float d = length(gl_PointCoord - 0.5);
+          if (d > 0.5) discard;
+          float a = pow(smoothstep(0.5, 0.0, d), 1.6);
+          gl_FragColor = vec4(vColor * (0.75 + 0.5 * vTw), a * uOpacity);
+        }
+      `,
+      transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    galMat.userData.baseOpacity = 0.95;
+    // applyOpacity()がm.opacityに書くので、uniformへ橋渡しする
+    Object.defineProperty(galMat, "opacity", {
+      get() { return this.uniforms.uOpacity.value; },
+      set(v) { this.uniforms.uOpacity.value = v; },
+    });
+    mats.push(galMat);
+    const pts = new THREE.Points(geo, galMat);
+    pts.frustumCulled = false;   // positionが(r,θ,z)なのでバウンディング計算が当てにならない
+    const core = mesh(new THREE.SphereGeometry(0.06, 12, 8), 0.95, 0xfff2cc);
+    const coreGlow = new THREE.Sprite(reg(new THREE.SpriteMaterial({
+      map: glowTex, color: 0xffe9b0, transparent: true, opacity: 0.5,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }), 0.5));
+    coreGlow.scale.setScalar(0.5);
+    grp.add(pts, core, coreGlow);
     grp.rotation.x = -0.85;
-    shapes.push({ name: "GALAXY", grp, glowColor: 0xbfaaff, glowScale: 2.4, spin(dt, rate) {
-      pts.rotation.z += dt * rate * 0.5;
-    }});
+    shapes.push({
+      name: "GALAXY", grp, glowColor: 0xbfaaff, glowScale: 2.4,
+      spin(dt, rate) {
+        galMat.uniforms.uTime.value += dt * rate * 0.55;
+        galMat.uniforms.uBurst.value = Math.max(0, galMat.uniforms.uBurst.value - dt * 1.8);
+        galMat.uniforms.uScale.value = renderer.domElement.height * 0.5;
+        core.rotation.y += dt * rate * 0.3;
+      },
+      onGrab() { galMat.uniforms.uBurst.value = 1; },   // 星が散って再収束
+    });
   }
 
   return shapes;
@@ -344,6 +552,7 @@ class HoloObject {
     this.shapeIndex = i;
     const sh = this.shapes[i];
     sh.grp.visible = true;
+    sh.onGrab?.();
     this.ring.visible = sh.name === "CUBE" || sh.name === "SPHERE";
     this.glowMat.color.set(sh.glowColor ?? 0xffffff);
     this.glow.scale.setScalar(sh.glowScale ?? 3.2);
@@ -352,10 +561,13 @@ class HoloObject {
 
   // target: ワールド座標 / size: 手の大きさ由来の基準サイズ / grabbed: つまみ中か
   show(target, size, grabbed, dt, t) {
+    if (this.opacity === 0) sfx.appear();  // 出現の瞬間
     if (grabbed && !this.grabbed) {        // 掴んだ瞬間
       this.pulse = 1;
       this.vel.set(0, 0, 0);
       this.prevTarget.copy(target);
+      this.shapes[this.shapeIndex].onGrab?.();
+      sfx.grab();
     }
     if (grabbed) {                         // 投げ用の速度トラッキング
       const inst = target.clone().sub(this.prevTarget).divideScalar(Math.max(dt, 1e-3));
@@ -368,7 +580,7 @@ class HoloObject {
     this.lastSize = size * this.userScale;
 
     const bob = grabbed ? 0 : Math.sin(t * 2.2) * this.lastSize * 0.12;
-    this.pos.lerp(new THREE.Vector3(target.x, target.y + bob, 0), grabbed ? 0.5 : 0.35);
+    this.pos.lerp(new THREE.Vector3(target.x, target.y + bob, target.z), grabbed ? 0.5 : 0.35);
     this.group.position.copy(this.pos);
 
     this.pulse = Math.max(0, this.pulse - dt * 3);
@@ -391,16 +603,21 @@ class HoloObject {
     this.pos.addScaledVector(this.vel, dt);
     this.vel.multiplyScalar(Math.exp(-1.1 * dt));
     if (this.vel.length() < 0.05) this.vel.set(0, 0, 0);
+    this.pos.z += -this.pos.z * (1 - Math.exp(-1.5 * dt));   // 奥行きは基準面へゆっくり戻る
 
-    const wpp = worldPerPixel();
-    const halfW = (wpp * innerWidth) / 2, halfH = (wpp * innerHeight) / 2;
+    // このオブジェクトの深さでの画面端を計算して跳ね返す
+    const dist = camera.position.z - this.pos.z;
+    const h = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * dist;
+    const halfH = h / 2, halfW = (h * (innerWidth / innerHeight)) / 2;
     const r = this.lastSize * 0.6;
-    if (this.pos.x > halfW - r)  { this.pos.x = halfW - r;  this.vel.x = -Math.abs(this.vel.x) * 0.75; }
-    if (this.pos.x < -halfW + r) { this.pos.x = -halfW + r; this.vel.x = Math.abs(this.vel.x) * 0.75; }
-    if (this.pos.y > halfH - r)  { this.pos.y = halfH - r;  this.vel.y = -Math.abs(this.vel.y) * 0.75; }
-    if (this.pos.y < -halfH + r) { this.pos.y = -halfH + r; this.vel.y = Math.abs(this.vel.y) * 0.75; }
+    let impact = 0;
+    if (this.pos.x > halfW - r)  { impact = Math.abs(this.vel.x); this.pos.x = halfW - r;  this.vel.x = -Math.abs(this.vel.x) * 0.75; }
+    if (this.pos.x < -halfW + r) { impact = Math.abs(this.vel.x); this.pos.x = -halfW + r; this.vel.x = Math.abs(this.vel.x) * 0.75; }
+    if (this.pos.y > halfH - r)  { impact = Math.max(impact, Math.abs(this.vel.y)); this.pos.y = halfH - r;  this.vel.y = -Math.abs(this.vel.y) * 0.75; }
+    if (this.pos.y < -halfH + r) { impact = Math.max(impact, Math.abs(this.vel.y)); this.pos.y = -halfH + r; this.vel.y = Math.abs(this.vel.y) * 0.75; }
+    if (impact > 0.35) sfx.bounce(impact);
 
-    this.group.position.set(this.pos.x, this.pos.y + Math.sin(t * 2) * this.lastSize * 0.08, 0);
+    this.group.position.set(this.pos.x, this.pos.y + Math.sin(t * 2) * this.lastSize * 0.08, this.pos.z);
 
     this.pulse = Math.max(0, this.pulse - dt * 3);
     this.group.scale.setScalar(THREE.MathUtils.lerp(this.group.scale.x || this.lastSize, this.lastSize, 0.3));
@@ -432,6 +649,8 @@ let currentShape = 0;
 function setShape(i) {
   currentShape = i;
   for (const o of objs) o.setShape(i);
+  for (const b of modelBtns) b.classList.toggle("active", +b.dataset.shape === i);
+  sfx.uiSwitch();
   toast("MODEL: " + SHAPE_NAMES[i]);
 }
 // プラネタリウムなので初期モデルは太陽系
@@ -558,11 +777,26 @@ const CONNECTIONS = [
   [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17],
 ];
 let showSkeleton = true;
+function toggleSkeleton() {
+  showSkeleton = !showSkeleton;
+  toast("SKELETON " + (showSkeleton ? "ON" : "OFF"));
+}
 addEventListener("keydown", e => {
   const k = e.key.toLowerCase();
-  if (k === "h") { showSkeleton = !showSkeleton; toast("SKELETON " + (showSkeleton ? "ON" : "OFF")); }
+  if (k === "h") toggleSkeleton();
   else if (k === "m") setShape((currentShape + 1) % SHAPE_NAMES.length);
   else if (k >= "1" && k <= "5") setShape(+k - 1);
+});
+
+// 画面上のボタン(キーボードのないスマホ用)
+const modelBtns = [...document.querySelectorAll("#modelbar [data-shape]")];
+for (const b of modelBtns) b.addEventListener("click", () => setShape(+b.dataset.shape));
+for (const b of modelBtns) b.classList.toggle("active", +b.dataset.shape === currentShape);
+document.getElementById("btn-skel").addEventListener("click", toggleSkeleton);
+document.getElementById("btn-sound").addEventListener("click", e => {
+  const on = sfx.toggle();
+  e.currentTarget.textContent = on ? "🔊" : "🔇";
+  toast("AUDIO " + (on ? "ON" : "OFF"));
 });
 
 function drawSkeleton(landmarks, grabbed) {
@@ -611,6 +845,11 @@ let lastVideoTime = -1;
 let results = null;
 let scaleMode = null;   // {obj, d0, s0} 両手ピンチ拡縮中
 
+// 手ごとの平滑化・ピンチヒステリシス・奥行き基準の状態
+const handSlots = [{}, {}];
+function resetSlot(s) { s.lms = null; s.pinch = false; s.sizeW = 0; s.ref = 0; }
+handSlots.forEach(resetSlot);
+
 function tick() {
   requestAnimationFrame(tick);
   const dt = Math.min(clock.getDelta(), 0.05);
@@ -633,7 +872,20 @@ function tick() {
   const handData = [];
   const rawHands = results?.landmarks ?? [];
   for (let i = 0; i < Math.min(rawHands.length, 2); i++) {
-    const lms = rawHands[i];
+    const slot = handSlots[i];
+    const raw = rawHands[i];
+    // ランドマーク平滑化: 速く動くほど追従、ゆっくりだとブレ除去を優先
+    if (!slot.lms) slot.lms = raw.map(p => ({ x: p.x, y: p.y, z: p.z }));
+    else {
+      const v = Math.hypot(raw[9].x - slot.lms[9].x, raw[9].y - slot.lms[9].y) / Math.max(dt, 1e-3);
+      const alpha = THREE.MathUtils.clamp(0.15 + v * 2.5, 0.15, 0.9);
+      for (let j = 0; j < raw.length; j++) {
+        slot.lms[j].x += (raw[j].x - slot.lms[j].x) * alpha;
+        slot.lms[j].y += (raw[j].y - slot.lms[j].y) * alpha;
+        slot.lms[j].z += (raw[j].z - slot.lms[j].z) * alpha;
+      }
+    }
+    const lms = slot.lms;
     const palmIdx = [0, 5, 9, 13, 17];
     let px = 0, py = 0;
     for (const j of palmIdx) { const p = lmToScreen(lms[j]); px += p.x; py += p.y; }
@@ -642,17 +894,25 @@ function tick() {
     const palmSize = Math.hypot(midMcp.x - wrist.x, midMcp.y - wrist.y);
     const thumb = lmToScreen(lms[4]), index = lmToScreen(lms[8]);
     const pinchDist = Math.hypot(index.x - thumb.x, index.y - thumb.y);
-    const pinch = pinchDist < palmSize * 0.45;
+    // ヒステリシス: 掴むときは深く(0.40)、離すのは浅く(0.55)でチャタリング防止
+    const pinch = pinchDist < palmSize * (slot.pinch ? 0.55 : 0.40);
+    slot.pinch = pinch;
     const pinchS = { x: (thumb.x + index.x) / 2, y: (thumb.y + index.y) / 2 };
+    // 奥行き: 手のひらサイズの変化から推定(基準値はゆっくり自動キャリブレーション)
+    const sizeW = palmSize * wpp * 1.1;
+    slot.sizeW = slot.sizeW ? slot.sizeW + (sizeW - slot.sizeW) * 0.15 : sizeW;
+    slot.ref = slot.ref ? slot.ref + (slot.sizeW - slot.ref) * 0.0015 : slot.sizeW;
+    const zOff = THREE.MathUtils.clamp((slot.sizeW - slot.ref) * 3.0, -0.55, 0.85);
     handData.push({
       lms, pinch, pinchS,
-      palmW: screenToWorld(px, py),
-      pinchW: screenToWorld(pinchS.x, pinchS.y),
-      hoverW: screenToWorld(px, py - palmSize * 1.6),
-      sizeW: palmSize * wpp * 1.1,
+      palmW: screenToWorld(px, py, zOff),
+      pinchW: screenToWorld(pinchS.x, pinchS.y, zOff),
+      hoverW: screenToWorld(px, py - palmSize * 1.6, zOff),
+      sizeW: slot.sizeW,
     });
     if (showSkeleton) drawSkeleton(lms, pinch);
   }
+  for (let i = rawHands.length; i < 2; i++) resetSlot(handSlots[i]);   // 消えた手はリセット
 
   const bothPinch = handData.length === 2 && handData[0].pinch && handData[1].pinch;
 
@@ -697,11 +957,13 @@ function tick() {
         const hand = handData[h];
         const ref = hand.pinch ? hand.pinchW : hand.palmW;
         const capR = Math.max(o.lastSize * 1.3, hand.sizeW * 1.4);
-        if (ref.distanceTo(o.pos) < capR) {
+        // 奥行きズレで取り逃さないようキャッチ判定はxy距離ベース
+        if (Math.hypot(ref.x - o.pos.x, ref.y - o.pos.y) < capR && Math.abs(ref.z - o.pos.z) < 0.7) {
           o.free = false;
           o.owner = h;
           o.vel.set(0, 0, 0);
           o.pulse = 1;
+          sfx.catchChime();
           break;
         }
       }
@@ -724,6 +986,7 @@ function tick() {
         obj.owner = -1;
         obj.grabbed = false;
         obj.vel.clampLength(0, MAX_SPEED);
+        sfx.release(obj.vel.length());
         obj.updateFree(dt, t);
       } else {
         obj.show(grabbed ? hand.pinchW : hand.hoverW, hand.sizeW, grabbed, dt, t);

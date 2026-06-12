@@ -66,6 +66,7 @@
 <div id="info">
   ✋ 手のひらをかざす → オブジェクト出現 / 手を前後に動かす → 近づく・遠ざかる<br>
   🤏 つまむ → 掴んで移動 / 素早く振って離す → 投げる（壁で跳ね返る）<br>
+  👊→🖐 グーからパッと開く → 指の向きへ発射！<br>
   🖐 投げた物に手を近づける → キャッチ / 👐 両手で同時につまむ → 拡大・縮小<br>
   <b>1</b>:キューブ <b>2</b>:球体 <b>3</b>:リアクター <b>4</b>:太陽系 <b>5</b>:銀河 <b>6</b>:はなはな（<b>M</b>:切替）/ <b>H</b>:スケルトン / <b>U</b>:UI開閉 / 🔊 クリックでサウンドON
 </div>
@@ -102,6 +103,7 @@ const HOLO = new THREE.Color(0x33ccff);
 const HOLO_BRIGHT = new THREE.Color(0xaaf0ff);
 const THROW_SPEED = 1.3;   // これ以上の速さでピンチを離すと投げる(ワールド単位/秒)
 const MAX_SPEED = 6;
+const LAUNCH_SPEED = 3.4;  // グー→パーで発射する初速
 
 let toastTimer;
 function toast(msg, ms = 2500) {
@@ -187,6 +189,7 @@ class SFX {
   appear() { this.whoosh(300, 2400, 0.45, 0.1); this.blip(180, 740, 0.4, 0.07); }
   grab() { this.blip(480, 940, 0.1, 0.16, "triangle"); }
   release(speed) { this.whoosh(1800, 260, 0.32, THREE.MathUtils.clamp(0.05 + speed * 0.04, 0.08, 0.2)); }
+  launch() { this.whoosh(2400, 220, 0.38, 0.22); this.blip(160, 70, 0.28, 0.16, "sawtooth"); }
   bounce(impact) {
     if (!this.ctx) return;
     if (this.ctx.currentTime - (this._lastBounce ?? 0) < 0.08) return;
@@ -612,6 +615,7 @@ class HoloObject {
     this.grabbed = false;
     this.pulse = 0;
     this.userScale = 1;     // 両手ピンチで変わる倍率
+    this.noCatchUntil = 0;  // 発射直後の再キャッチ防止
     this.lastSize = 0.3;
     this.mats = [];
 
@@ -967,8 +971,27 @@ let scaleMode = null;   // {obj, d0, s0} 両手ピンチ拡縮中
 
 // 手ごとの平滑化・ピンチヒステリシス・奥行き基準の状態
 const handSlots = [{}, {}];
-function resetSlot(s) { s.lms = null; s.pinch = false; s.sizeW = 0; s.ref = 0; }
+function resetSlot(s) { s.lms = null; s.pinch = false; s.sizeW = 0; s.ref = 0; s.fistAt = -1; }
 handSlots.forEach(resetSlot);
+
+// 発射時の衝撃波リング(HUD)
+const ripples = [];
+function spawnRipple(x, y) { ripples.push({ x, y, t0: clock.elapsedTime }); }
+function drawRipples() {
+  const t = clock.elapsedTime;
+  for (let i = ripples.length - 1; i >= 0; i--) {
+    const k = (t - ripples[i].t0) / 0.5;
+    if (k >= 1) { ripples.splice(i, 1); continue; }
+    hudCtx.strokeStyle = `rgba(130,225,255,${(1 - k) * 0.9})`;
+    hudCtx.lineWidth = 1 + 3 * (1 - k);
+    hudCtx.shadowColor = "rgba(0,200,255,0.9)";
+    hudCtx.shadowBlur = 14;
+    hudCtx.beginPath();
+    hudCtx.arc(ripples[i].x, ripples[i].y, 24 + k * 150, 0, Math.PI * 2);
+    hudCtx.stroke();
+  }
+  hudCtx.shadowBlur = 0;
+}
 
 function tick() {
   requestAnimationFrame(tick);
@@ -1018,14 +1041,30 @@ function tick() {
     const pinch = pinchDist < palmSize * (slot.pinch ? 0.55 : 0.40);
     slot.pinch = pinch;
     const pinchS = { x: (thumb.x + index.x) / 2, y: (thumb.y + index.y) / 2 };
+    // 手の開き具合: 指先4本と手のひら中心の平均距離 / 手のひらサイズ(グー≈0.6 / パー≈1.6)
+    let openSum = 0;
+    for (const j of [8, 12, 16, 20]) { const p = lmToScreen(lms[j]); openSum += Math.hypot(p.x - px, p.y - py); }
+    const openness = openSum / 4 / Math.max(palmSize, 1);
+    // グー→パー検出: 握った時刻を覚えて、0.3秒以内に大きく開いたら発射ジェスチャー
+    if (openness < 0.85) slot.fistAt = t;
+    let burst = false;
+    if (slot.fistAt >= 0 && openness > 1.35) {
+      if (t - slot.fistAt < 0.3) burst = true;
+      slot.fistAt = -1;
+    }
     // 奥行き: 手のひらサイズの変化から推定(基準値はゆっくり自動キャリブレーション)
     const sizeW = palmSize * wpp * 1.1;
     slot.sizeW = slot.sizeW ? slot.sizeW + (sizeW - slot.sizeW) * 0.15 : sizeW;
     slot.ref = slot.ref ? slot.ref + (slot.sizeW - slot.ref) * 0.0015 : slot.sizeW;
     const zOff = THREE.MathUtils.clamp((slot.sizeW - slot.ref) * 3.0, -0.55, 0.85);
+    const palmW = screenToWorld(px, py, zOff);
+    // 発射方向 = 手首→中指つけ根(指の向き)
+    const launchDir = screenToWorld(midMcp.x, midMcp.y, zOff).sub(screenToWorld(wrist.x, wrist.y, zOff));
+    if (launchDir.lengthSq() < 1e-6) launchDir.set(0, 1, 0); else launchDir.normalize();
     handData.push({
-      lms, pinch, pinchS,
-      palmW: screenToWorld(px, py, zOff),
+      lms, pinch, pinchS, burst, launchDir,
+      palmS: { x: px, y: py },
+      palmW,
       pinchW: screenToWorld(pinchS.x, pinchS.y, zOff),
       hoverW: screenToWorld(px, py - palmSize * 1.6, zOff),
       sizeW: slot.sizeW,
@@ -1072,6 +1111,7 @@ function tick() {
     for (const o of objs) {
       if (!o.free) continue;
       o.updateFree(dt, t);
+      if (t < o.noCatchUntil) continue;   // 発射直後はキャッチ判定しない
       for (let h = 0; h < handData.length; h++) {
         if (objs.some(x => x.owner === h && !x.free)) continue;  // この手はもう持っている
         const hand = handData[h];
@@ -1100,7 +1140,19 @@ function tick() {
       if (!obj) continue;   // 両方とも飛行中
 
       const grabbed = hand.pinch;
-      if (obj.grabbed && !grabbed && obj.vel.length() > THROW_SPEED) {
+      if (hand.burst && obj.opacity > 0.3) {
+        // グーからパッと開いた → 指の向きへ発射
+        obj.free = true;
+        obj.owner = -1;
+        obj.grabbed = false;
+        obj.noCatchUntil = t + 0.45;   // 手元から飛び立つ間は再キャッチしない
+        obj.vel.copy(hand.launchDir).multiplyScalar(LAUNCH_SPEED);
+        obj.pulse = 1;
+        obj.shapes[obj.shapeIndex].onGrab?.();   // 銀河バースト・花びら舞いも発動
+        sfx.launch();
+        spawnRipple(hand.palmS.x, hand.palmS.y);
+        obj.updateFree(dt, t);
+      } else if (obj.grabbed && !grabbed && obj.vel.length() > THROW_SPEED) {
         // ピンチを勢いよく離した → 投げる
         obj.free = true;
         obj.owner = -1;
@@ -1119,6 +1171,7 @@ function tick() {
     }
   }
 
+  drawRipples();
   renderer.render(scene, camera);
 }
 

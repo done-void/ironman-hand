@@ -31,7 +31,15 @@
     position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
     display: flex; gap: 8px; z-index: 20;
   }
-  #modelbar button {
+  #info, #modelbar {
+    transition: transform .35s cubic-bezier(.4, 0, .2, 1), opacity .35s;
+  }
+  body.ui-closed #info { opacity: 0; transform: translateY(24px); pointer-events: none; }
+  body.ui-closed #modelbar { opacity: 0; transform: translate(-50%, 90px); pointer-events: none; }
+  #ui-toggle {
+    position: fixed; right: 16px; bottom: 14px; z-index: 21;
+  }
+  #modelbar button, #ui-toggle {
     width: 46px; height: 46px; border-radius: 10px;
     background: rgba(0, 20, 40, .45); color: #7fdfff;
     border: 1px solid rgba(0,200,255,.4); font-size: 20px; line-height: 1;
@@ -44,7 +52,8 @@
   }
   @media (max-width: 640px) {
     #info { font-size: 10px; line-height: 1.7; left: 12px; right: 12px; bottom: 72px; padding: 8px 10px; }
-    #modelbar button { width: 42px; height: 42px; font-size: 18px; }
+    #modelbar button, #ui-toggle { width: 42px; height: 42px; font-size: 18px; }
+    #ui-toggle { right: 12px; }
   }
 </style>
 </head>
@@ -58,7 +67,7 @@
   ✋ 手のひらをかざす → オブジェクト出現 / 手を前後に動かす → 近づく・遠ざかる<br>
   🤏 つまむ → 掴んで移動 / 素早く振って離す → 投げる（壁で跳ね返る）<br>
   🖐 投げた物に手を近づける → キャッチ / 👐 両手で同時につまむ → 拡大・縮小<br>
-  <b>1</b>:キューブ <b>2</b>:球体 <b>3</b>:リアクター <b>4</b>:太陽系 <b>5</b>:銀河（<b>M</b>:切替）/ <b>H</b>:スケルトン / 🔊 クリックでサウンドON
+  <b>1</b>:キューブ <b>2</b>:球体 <b>3</b>:リアクター <b>4</b>:太陽系 <b>5</b>:銀河 <b>6</b>:はなはな（<b>M</b>:切替）/ <b>H</b>:スケルトン / <b>U</b>:UI開閉 / 🔊 クリックでサウンドON
 </div>
 <div id="modelbar">
   <button data-shape="0" title="キューブ">◻</button>
@@ -66,9 +75,11 @@
   <button data-shape="2" title="アークリアクター">⊙</button>
   <button data-shape="3" title="太陽系">☀</button>
   <button data-shape="4" title="銀河">🌌</button>
+  <button data-shape="5" title="はなはな">🌸</button>
   <button id="btn-skel" title="スケルトン表示切替">🖐</button>
   <button id="btn-sound" title="サウンドON/OFF">🔊</button>
 </div>
+<button id="ui-toggle" title="UIを閉じる">▾</button>
 
 <script type="importmap">
 {
@@ -252,7 +263,7 @@ function makeGlowTexture() {
 const glowTex = makeGlowTexture();
 
 // ---------- 5種のホログラム形状 ----------
-const SHAPE_NAMES = ["CUBE", "SPHERE", "ARC REACTOR", "SOLAR SYSTEM", "GALAXY"];
+const SHAPE_NAMES = ["CUBE", "SPHERE", "ARC REACTOR", "SOLAR SYSTEM", "GALAXY", "HANA-HANA"];
 
 function buildShapes(mats) {
   const reg = (m, base) => { m.userData.baseOpacity = base; mats.push(m); return m; };
@@ -490,6 +501,98 @@ function buildShapes(mats) {
         core.rotation.y += dt * rate * 0.3;
       },
       onGrab() { galMat.uniforms.uBurst.value = 1; },   // 星が散って再収束
+    });
+  }
+
+  // 6) はなはな(すすきのネオン風 — ピンクの花 + 舞う花びら + ネオンサイン)
+  {
+    const grp = new THREE.Group();
+    const NEON_PINK = 0xff5fae, NEON_LIGHT = 0xffa6d5;
+
+    // 花本体: 楕円花びら2層 + コア(ピボットで放射状に配置)
+    const bloom = new THREE.Group();          // 花と花びらだけ傾ける(サインは正面のまま)
+    const flower = new THREE.Group();
+    const petalGeo = new THREE.SphereGeometry(0.16, 10, 8);
+    petalGeo.scale(1, 0.42, 0.14);
+    const petalLayers = [
+      { n: 6, r: 0.21, tilt: 0.5, color: NEON_PINK, op: 0.7, off: 0 },
+      { n: 6, r: 0.12, tilt: 0.95, color: NEON_LIGHT, op: 0.85, off: Math.PI / 6 },
+    ];
+    for (const { n, r, tilt, color, op, off } of petalLayers) {
+      for (let i = 0; i < n; i++) {
+        const pivot = new THREE.Group();
+        pivot.rotation.y = (i / n) * Math.PI * 2 + off;
+        const p = mesh(petalGeo, op, color);
+        p.position.x = r;
+        p.rotation.z = tilt;
+        pivot.add(p);
+        flower.add(pivot);
+      }
+    }
+    const flowerCore = mesh(new THREE.SphereGeometry(0.085, 14, 10), 0.95, 0xffe066);
+    flower.add(flowerCore);
+
+    // 舞う花びら(2つの粒子クラウドを逆回転させる)
+    const mkPetalCloud = (n, size, color) => {
+      const pos = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const a = Math.random() * Math.PI * 2, r = 0.28 + Math.random() * 0.34;
+        pos[i * 3] = Math.cos(a) * r;
+        pos[i * 3 + 1] = (Math.random() - 0.5) * 0.5;
+        pos[i * 3 + 2] = Math.sin(a) * r;
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      return new THREE.Points(g, reg(new THREE.PointsMaterial({
+        color, size, transparent: true, opacity: 0.8,
+        blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+      }), 0.8));
+    };
+    const petalCloudA = mkPetalCloud(90, 0.035, 0xff9ed0);
+    const petalCloudB = mkPetalCloud(70, 0.05, NEON_PINK);
+
+    // ネオンサイン「はなはな」
+    const signCanvas = document.createElement("canvas");
+    signCanvas.width = 512; signCanvas.height = 160;
+    const sg = signCanvas.getContext("2d");
+    sg.strokeStyle = "rgba(255,95,174,0.95)";
+    sg.lineWidth = 6;
+    sg.shadowColor = "#ff2d88"; sg.shadowBlur = 24;
+    sg.beginPath(); sg.roundRect(10, 10, 492, 140, 28); sg.stroke();
+    sg.font = "bold 84px 'Hiragino Sans', sans-serif";
+    sg.textAlign = "center"; sg.textBaseline = "middle";
+    sg.shadowBlur = 30;
+    sg.fillStyle = "#ffd9ec";
+    sg.fillText("はなはな", 256, 86);
+    const signMat = reg(new THREE.SpriteMaterial({
+      map: new THREE.CanvasTexture(signCanvas), transparent: true, opacity: 0.9,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }), 0.9);
+    const sign = new THREE.Sprite(signMat);
+    sign.scale.set(0.66, 0.2, 1);
+    sign.position.y = 0.52;
+
+    bloom.add(flower, petalCloudA, petalCloudB);
+    bloom.rotation.x = -1.05;   // 花の正面を視点側へ
+    grp.add(bloom, sign);
+
+    let hanaBurst = 0, hanaT = 0;
+    shapes.push({
+      name: "HANA-HANA", grp, glowColor: 0xff7fc4, glowScale: 2.2,
+      spin(dt, rate) {
+        hanaT += dt;
+        hanaBurst = Math.max(0, hanaBurst - dt * 1.6);
+        flower.rotation.y += dt * rate * 0.5;
+        flower.scale.setScalar(1 + Math.sin(hanaT * 2.4) * 0.05 + hanaBurst * 0.35);
+        petalCloudA.rotation.y += dt * (0.35 + rate * 0.25);
+        petalCloudB.rotation.y -= dt * (0.25 + rate * 0.2);
+        const cs = 1 + hanaBurst * 0.9;
+        petalCloudA.scale.setScalar(cs);
+        petalCloudB.scale.setScalar(cs);
+        // ネオン管のちらつき(applyOpacityがbaseOpacityを毎フレーム参照する)
+        signMat.userData.baseOpacity = Math.random() < 0.05 ? 0.4 : 0.9 + Math.sin(hanaT * 30) * 0.04;
+      },
+      onGrab() { hanaBurst = 1; },   // 掴むと花びらが舞い散る
     });
   }
 
@@ -784,9 +887,26 @@ function toggleSkeleton() {
 addEventListener("keydown", e => {
   const k = e.key.toLowerCase();
   if (k === "h") toggleSkeleton();
+  else if (k === "u") setUIOpen(document.body.classList.contains("ui-closed"));
   else if (k === "m") setShape((currentShape + 1) % SHAPE_NAMES.length);
-  else if (k >= "1" && k <= "5") setShape(+k - 1);
+  else if (k >= "1" && k <= "6") setShape(+k - 1);
 });
+
+// UI開閉(説明パネル+ボタンバーをまとめてしまう)
+const uiToggle = document.getElementById("ui-toggle");
+function setUIOpen(open) {
+  document.body.classList.toggle("ui-closed", !open);
+  uiToggle.textContent = open ? "▾" : "▴";
+  uiToggle.title = open ? "UIを閉じる" : "UIを開く";
+  localStorage.setItem("holo-ui-open", open ? "1" : "0");
+  sfx.uiSwitch();
+}
+uiToggle.addEventListener("click", () => setUIOpen(document.body.classList.contains("ui-closed")));
+if (localStorage.getItem("holo-ui-open") === "0") {
+  document.body.classList.add("ui-closed");
+  uiToggle.textContent = "▴";
+  uiToggle.title = "UIを開く";
+}
 
 // 画面上のボタン(キーボードのないスマホ用)
 const modelBtns = [...document.querySelectorAll("#modelbar [data-shape]")];
